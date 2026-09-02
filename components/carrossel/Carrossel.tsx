@@ -1,16 +1,22 @@
 'use client'
 
 import { useRef, useState, useTransition } from 'react'
-import { upload } from '@vercel/blob/client'
-import { criarItemCarrossel, removerItemCarrossel, moverItemCarrossel } from '@/actions/carrossel'
+import { removerItemCarrossel, moverItemCarrossel } from '@/actions/carrossel'
 
 // Carrossel institucional (fotos/videos) exibido entre "Sobre o
 // projeto" e o mapa das escolas. Publico: qualquer visitante ve as
 // midias, com setas/bolinhas de navegacao. Quando `autenticado` (mesma
 // sessao docente de lib/auth.ts), aparece tambem o painel de
-// administracao embutido: enviar novo item (upload direto pro Vercel
-// Blob, sem passar pela nossa Function - ver app/api/admin/carrossel/
-// upload/route.ts) e reordenar/remover os existentes.
+// administracao embutido: enviar novo item e reordenar/remover os
+// existentes.
+//
+// O envio (ver enviarArquivo abaixo) passa pela nossa propria rota
+// /api/admin/carrossel/upload via XMLHttpRequest (nao fetch: e o unico
+// jeito simples de acompanhar o progresso de upload no navegador) em
+// vez do upload direto navegador->Vercel Blob que a Vercel documenta -
+// esse caminho direto esbarra num bug conhecido deles (a requisicao
+// tenta passar por vercel.com/api/blob e e bloqueada por CORS). Ver o
+// comentario no topo da route.ts para o detalhe completo.
 
 export type ItemCarrossel = {
   id: number
@@ -24,8 +30,47 @@ type Props = {
   autenticado: boolean
 }
 
-const TAMANHO_MAX_MB = 100
+const TAMANHO_MAX_MB = 4 // limite do corpo de requisicao das Functions da Vercel (~4.5MB)
 const MAX_ARQUIVOS_POR_ENVIO = 10
+
+type RespostaUpload = { ok: true; item: unknown } | { error: string }
+
+// XMLHttpRequest em vez de fetch: precisamos do evento de progresso de
+// upload (xhr.upload.onprogress), que fetch nao expoe de forma simples
+// entre navegadores.
+function enviarArquivo(
+  arquivo: File,
+  legenda: string,
+  onProgresso: (percentual: number) => void
+): Promise<RespostaUpload> {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData()
+    formData.set('arquivo', arquivo)
+    formData.set('legenda', legenda)
+
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', '/api/admin/carrossel/upload')
+    xhr.upload.onprogress = (evento) => {
+      if (evento.lengthComputable) onProgresso(Math.round((evento.loaded / evento.total) * 100))
+    }
+    xhr.onerror = () => reject(new Error('Falha de rede ao enviar o arquivo.'))
+    xhr.onload = () => {
+      let corpo: RespostaUpload
+      try {
+        corpo = JSON.parse(xhr.responseText)
+      } catch {
+        reject(new Error(`Resposta inesperada do servidor (status ${xhr.status}).`))
+        return
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && 'ok' in corpo) {
+        resolve(corpo)
+      } else {
+        reject(new Error('error' in corpo ? corpo.error : `Erro ${xhr.status} ao enviar o arquivo.`))
+      }
+    }
+    xhr.send(formData)
+  })
+}
 
 export function Carrossel({ itens, autenticado }: Props) {
   const [indice, setIndice] = useState(0)
@@ -79,22 +124,15 @@ export function Carrossel({ itens, autenticado }: Props) {
     try {
       for (let i = 0; i < arquivos.length; i++) {
         const arquivo = arquivos[i]
-        const tipo = arquivo.type.startsWith('video/') ? 'VIDEO' : 'FOTO'
         const prefixo = arquivos.length > 1 ? `Enviando ${i + 1} de ${arquivos.length}` : 'Enviando'
         setProgressoLabel(`${prefixo}... 0%`)
 
-        const blob = await upload(arquivo.name, arquivo, {
-          access: 'public',
-          handleUploadUrl: '/api/admin/carrossel/upload',
-          onUploadProgress: (evento) => setProgressoLabel(`${prefixo}... ${Math.round(evento.percentage)}%`),
-        })
-
-        const resultado = await criarItemCarrossel({ tipo, url: blob.url, legenda: legenda || undefined })
-        if (!resultado.ok) {
+        const resultado = await enviarArquivo(arquivo, legenda, (pct) => setProgressoLabel(`${prefixo}... ${pct}%`))
+        if ('error' in resultado) {
           throw new Error(
             resultado.error === 'nao_autenticado'
               ? 'Sessão docente expirada — entre novamente e tente de novo.'
-              : `Falha ao salvar "${arquivo.name}" no banco (${resultado.error}).`
+              : `Falha ao enviar "${arquivo.name}" (${resultado.error}).`
           )
         }
         enviadosComSucesso++
@@ -190,7 +228,9 @@ export function Carrossel({ itens, autenticado }: Props) {
       {autenticado && (
         <form ref={formRef} action={onEnviar} className="carrossel-form">
           <label className="block text-sm" style={{ flex: 1, minWidth: 200 }}>
-            <span className="field-label">Adicionar fotos ou vídeos (até {MAX_ARQUIVOS_POR_ENVIO} de uma vez)</span>
+            <span className="field-label">
+              Adicionar fotos ou vídeos (até {MAX_ARQUIVOS_POR_ENVIO} de uma vez, {TAMANHO_MAX_MB}MB por arquivo)
+            </span>
             <input name="arquivos" type="file" accept="image/*,video/*" multiple required className="field-input" style={{ padding: 6 }} />
           </label>
           <label className="block text-sm" style={{ flex: 1, minWidth: 200 }}>

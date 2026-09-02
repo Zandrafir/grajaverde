@@ -1,57 +1,73 @@
-import { handleUpload, type HandleUploadBody } from '@vercel/blob/client'
+import { put } from '@vercel/blob'
 import { NextResponse } from 'next/server'
 import { estaAutenticado } from '@/lib/auth'
+import { criarItemCarrossel } from '@/actions/carrossel'
 
-// Endpoint chamado pelo SDK do Vercel Blob no navegador (ver
-// components/carrossel/Carrossel.tsx) para gerar um token de upload
-// direto do cliente para o Blob - o arquivo (foto/video) nunca passa
-// pela nossa Function, so o token passa por aqui, o que evita o limite
-// de tamanho de corpo de requisicao de uma Server Action normal.
+// Upload do carrossel institucional, proxiado pelo nosso servidor: o
+// arquivo sobe do navegador ate esta rota (multipart/form-data) e daqui
+// vai pro Vercel Blob com `put()`.
 //
-// A autenticacao (mesma senha docente de lib/auth.ts) e checada em
-// `onBeforeGenerateToken`, no servidor, antes de qualquer token ser
-// emitido - sem sessao valida, o upload e recusado aqui, antes de
-// tocar no Blob.
+// Por que nao o fluxo "client upload" (upload direto navegador -> Blob
+// com handleUpload/token) documentado pela Vercel: em alguns projetos
+// (o nosso incluso) esse fluxo tenta passar por
+// https://vercel.com/api/blob e e bloqueado por CORS no navegador - bug
+// conhecido e sem previsao de correcao do lado da Vercel (ver
+// community.vercel.com, thread "Vercel Blob client upload blocked by
+// CORS"). Proxiar pela nossa rota evita esse caminho inteiro.
+//
+// Contrapartida: o corpo da requisicao passa pela nossa Function, que
+// na Vercel (Hobby/Pro) tem limite de ~4.5MB por requisicao - por isso
+// TAMANHO_MAX_BYTES fica com folga abaixo disso. Fotos de celular cabem
+// tranquilamente; videos maiores que isso nao vao caber neste caminho.
+const TIPOS_PERMITIDOS = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+]
+const TAMANHO_MAX_BYTES = 4 * 1024 * 1024 // 4MB - Functions da Vercel aceitam ate ~4.5MB de corpo
+
 export async function POST(request: Request): Promise<NextResponse> {
-  const body = (await request.json()) as HandleUploadBody
+  if (!(await estaAutenticado())) {
+    return NextResponse.json({ error: 'nao_autenticado' }, { status: 401 })
+  }
+
+  let formData: FormData
+  try {
+    formData = await request.formData()
+  } catch {
+    return NextResponse.json({ error: 'requisicao_invalida' }, { status: 400 })
+  }
+
+  const arquivo = formData.get('arquivo')
+  const legenda = String(formData.get('legenda') ?? '').trim()
+
+  if (!(arquivo instanceof File) || arquivo.size === 0) {
+    return NextResponse.json({ error: 'sem_arquivo' }, { status: 400 })
+  }
+  if (!TIPOS_PERMITIDOS.includes(arquivo.type)) {
+    return NextResponse.json({ error: 'tipo_nao_permitido' }, { status: 400 })
+  }
+  if (arquivo.size > TAMANHO_MAX_BYTES) {
+    return NextResponse.json({ error: 'arquivo_grande' }, { status: 413 })
+  }
+
+  const tipo = arquivo.type.startsWith('video/') ? 'VIDEO' : 'FOTO'
 
   try {
-    const jsonResponse = await handleUpload({
-      body,
-      request,
-      onBeforeGenerateToken: async () => {
-        if (!(await estaAutenticado())) {
-          throw new Error('Nao autenticado: faca login como docente antes de enviar arquivos.')
-        }
-        return {
-          allowedContentTypes: [
-            'image/jpeg',
-            'image/png',
-            'image/webp',
-            'image/gif',
-            'video/mp4',
-            'video/webm',
-            'video/quicktime',
-          ],
-          addRandomSuffix: true,
-          maximumSizeInBytes: 100 * 1024 * 1024, // 100MB, folga para video curto
-        }
-      },
-      onUploadCompleted: async () => {
-        // Nao gravamos no banco aqui de proposito: esse callback e um
-        // webhook do Vercel Blob para a URL publica do deploy, que nao
-        // chega em `npm run dev` local. O registro em CarrosselItem e
-        // criado explicitamente pelo client logo apos `upload()`
-        // resolver (ver actions/carrossel.ts:criarItemCarrossel),
-        // assim o fluxo funciona igual em local e em producao.
-      },
-    })
+    const blob = await put(arquivo.name, arquivo, { access: 'public', addRandomSuffix: true })
 
-    return NextResponse.json(jsonResponse)
+    const resultado = await criarItemCarrossel({ tipo, url: blob.url, legenda: legenda || undefined })
+    if (!resultado.ok) {
+      return NextResponse.json({ error: resultado.error }, { status: 400 })
+    }
+
+    return NextResponse.json({ ok: true, item: resultado.item })
   } catch (erro) {
-    return NextResponse.json(
-      { error: erro instanceof Error ? erro.message : 'Erro ao gerar token de upload' },
-      { status: 400 }
-    )
+    console.error('Falha ao enviar midia do carrossel:', erro)
+    return NextResponse.json({ error: 'falha_upload' }, { status: 500 })
   }
 }
