@@ -25,12 +25,13 @@ type Props = {
 }
 
 const TAMANHO_MAX_MB = 100
+const MAX_ARQUIVOS_POR_ENVIO = 10
 
 export function Carrossel({ itens, autenticado }: Props) {
   const [indice, setIndice] = useState(0)
   const [pending, startTransition] = useTransition()
   const [enviando, setEnviando] = useState(false)
-  const [progresso, setProgresso] = useState(0)
+  const [progressoLabel, setProgressoLabel] = useState('')
   const [erro, setErro] = useState<string | null>(null)
   const formRef = useRef<HTMLFormElement | null>(null)
 
@@ -43,43 +44,70 @@ export function Carrossel({ itens, autenticado }: Props) {
     setIndice(((i % total) + total) % total)
   }
 
+  // Extrai uma mensagem legivel do erro real (lancado pelo SDK do Vercel
+  // Blob ou pela nossa rota /api/admin/carrossel/upload) em vez de so
+  // mostrar "tente novamente" - essencial para diagnosticar problemas de
+  // configuracao (ex: BLOB_READ_WRITE_TOKEN ausente) sem precisar ficar
+  // trocando print com quem esta usando o site.
+  function mensagemDeErro(e: unknown): string {
+    if (e instanceof Error && e.message) return e.message
+    return 'Erro desconhecido ao enviar o arquivo.'
+  }
+
   async function onEnviar(formData: FormData) {
     setErro(null)
-    const arquivo = formData.get('arquivo') as File | null
+    const arquivosInput = formData.getAll('arquivos') as File[]
+    const arquivos = arquivosInput.filter((a) => a && a.size > 0)
     const legenda = String(formData.get('legenda') ?? '').trim()
 
-    if (!arquivo || arquivo.size === 0) {
+    if (arquivos.length === 0) {
       setErro('sem_arquivo')
       return
     }
-    if (arquivo.size > TAMANHO_MAX_MB * 1024 * 1024) {
+    if (arquivos.length > MAX_ARQUIVOS_POR_ENVIO) {
+      setErro('muitos_arquivos')
+      return
+    }
+    const grandeDemais = arquivos.find((a) => a.size > TAMANHO_MAX_MB * 1024 * 1024)
+    if (grandeDemais) {
       setErro('arquivo_grande')
       return
     }
 
-    const tipo = arquivo.type.startsWith('video/') ? 'VIDEO' : 'FOTO'
-
     setEnviando(true)
-    setProgresso(0)
+    let enviadosComSucesso = 0
     try {
-      const blob = await upload(arquivo.name, arquivo, {
-        access: 'public',
-        handleUploadUrl: '/api/admin/carrossel/upload',
-        onUploadProgress: (evento) => setProgresso(Math.round(evento.percentage)),
-      })
+      for (let i = 0; i < arquivos.length; i++) {
+        const arquivo = arquivos[i]
+        const tipo = arquivo.type.startsWith('video/') ? 'VIDEO' : 'FOTO'
+        const prefixo = arquivos.length > 1 ? `Enviando ${i + 1} de ${arquivos.length}` : 'Enviando'
+        setProgressoLabel(`${prefixo}... 0%`)
 
-      const resultado = await criarItemCarrossel({ tipo, url: blob.url, legenda: legenda || undefined })
-      if (!resultado.ok) {
-        setErro(resultado.error)
-        return
+        const blob = await upload(arquivo.name, arquivo, {
+          access: 'public',
+          handleUploadUrl: '/api/admin/carrossel/upload',
+          onUploadProgress: (evento) => setProgressoLabel(`${prefixo}... ${Math.round(evento.percentage)}%`),
+        })
+
+        const resultado = await criarItemCarrossel({ tipo, url: blob.url, legenda: legenda || undefined })
+        if (!resultado.ok) {
+          throw new Error(
+            resultado.error === 'nao_autenticado'
+              ? 'Sessão docente expirada — entre novamente e tente de novo.'
+              : `Falha ao salvar "${arquivo.name}" no banco (${resultado.error}).`
+          )
+        }
+        enviadosComSucesso++
       }
+
       formRef.current?.reset()
-      setIndice(total) // pula pro item recem-adicionado (agora o ultimo)
-    } catch {
-      setErro('falha_upload')
+      setIndice(total + enviadosComSucesso - 1) // pula pro ultimo item recem-adicionado
+    } catch (e) {
+      const jaEnviados = enviadosComSucesso > 0 ? ` (${enviadosComSucesso} de ${arquivos.length} já foram enviados com sucesso.)` : ''
+      setErro(`${mensagemDeErro(e)}${jaEnviados}`)
     } finally {
       setEnviando(false)
-      setProgresso(0)
+      setProgressoLabel('')
     }
   }
 
@@ -162,22 +190,23 @@ export function Carrossel({ itens, autenticado }: Props) {
       {autenticado && (
         <form ref={formRef} action={onEnviar} className="carrossel-form">
           <label className="block text-sm" style={{ flex: 1, minWidth: 200 }}>
-            <span className="field-label">Adicionar foto ou vídeo</span>
-            <input name="arquivo" type="file" accept="image/*,video/*" required className="field-input" style={{ padding: 6 }} />
+            <span className="field-label">Adicionar fotos ou vídeos (até {MAX_ARQUIVOS_POR_ENVIO} de uma vez)</span>
+            <input name="arquivos" type="file" accept="image/*,video/*" multiple required className="field-input" style={{ padding: 6 }} />
           </label>
           <label className="block text-sm" style={{ flex: 1, minWidth: 200 }}>
-            <span className="field-label">Legenda (opcional)</span>
+            <span className="field-label">Legenda (opcional, aplicada a todos os arquivos deste envio)</span>
             <input name="legenda" type="text" placeholder="Ex: Mutirão de plantio na EE Adriao Bernardes" className="field-input" />
           </label>
           <button type="submit" disabled={enviando} className="btn-primary">
-            {enviando ? `Enviando... ${progresso}%` : 'Enviar'}
+            {enviando ? progressoLabel || 'Enviando...' : 'Enviar'}
           </button>
 
-          {erro === 'sem_arquivo' && <p className="form-error">Escolha um arquivo antes de enviar.</p>}
-          {erro === 'arquivo_grande' && <p className="form-error">Arquivo maior que {TAMANHO_MAX_MB}MB — escolha um arquivo menor.</p>}
-          {erro === 'falha_upload' && <p className="form-error">Não foi possível enviar o arquivo. Tente novamente.</p>}
-          {erro === 'nao_autenticado' && <p className="form-error">Sessão docente expirada — entre novamente.</p>}
-          {erro === 'url_invalida' && <p className="form-error">Falha ao registrar o arquivo enviado. Tente novamente.</p>}
+          {erro === 'sem_arquivo' && <p className="form-error">Escolha ao menos um arquivo antes de enviar.</p>}
+          {erro === 'muitos_arquivos' && (
+            <p className="form-error">Selecione no máximo {MAX_ARQUIVOS_POR_ENVIO} arquivos por envio.</p>
+          )}
+          {erro === 'arquivo_grande' && <p className="form-error">Um dos arquivos passa de {TAMANHO_MAX_MB}MB — escolha arquivos menores.</p>}
+          {erro && !['sem_arquivo', 'muitos_arquivos', 'arquivo_grande'].includes(erro) && <p className="form-error">{erro}</p>}
         </form>
       )}
     </div>
