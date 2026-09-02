@@ -68,6 +68,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ ok: true, item: resultado.item })
   } catch (erro) {
     console.error('Falha ao enviar midia do carrossel:', erro)
-    return NextResponse.json({ error: 'falha_upload' }, { status: 500 })
+    // Devolve a mensagem real do erro (do Vercel Blob ou do Prisma) em
+    // vez de um "falha_upload" generico - essencial pra diagnosticar
+    // problemas de configuracao (token, banco) direto pela tela, sem
+    // depender dos logs da Vercel a cada tentativa.
+    const mensagem = erro instanceof Error ? erro.message : 'Erro desconhecido ao enviar o arquivo.'
+    return NextResponse.json({ error: mensagem }, { status: 500 })
   }
 }
