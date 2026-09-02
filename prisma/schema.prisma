@@ -1,0 +1,75 @@
+// Verde do Grajau - schema Prisma
+// Neon.Tech (Postgres serverless): DATABASE_URL usa a connection string
+// "pooled" (via PgBouncer) para o runtime da aplicacao; DIRECT_URL usa a
+// connection string direta, exigida pelo Prisma para rodar migrations.
+// Ambas vem do painel do Neon (Connection Details): a pooled tem
+// "-pooler" no host, a direta nao tem.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Escola {
+  id           Int       @id @default(autoincrement())
+  nome         String
+  endereco     String?
+  cep          String?
+  latitude     Float?
+  longitude    Float?
+  aproximado   Boolean   @default(false)
+  participante Boolean   @default(false)
+  tokenEdicao  String    @unique @default(uuid())
+  plantios     Plantio[]
+  criadoEm     DateTime  @default(now())
+
+  @@map("escolas")
+}
+
+model Categoria {
+  id       Int                @id @default(autoincrement())
+  slug     String             @unique
+  nome     String
+  plantios PlantioCategoria[]
+
+  @@map("categorias")
+}
+
+model Plantio {
+  id                   Int                @id @default(autoincrement())
+  escola               Escola             @relation(fields: [escolaId], references: [id])
+  escolaId             Int
+  quantidade           Int
+  especie              String?
+  disciplinaEnvolvida  String?
+  nomeProjeto          String?
+  dataRegistro         DateTime           @default(now())
+  categorias           PlantioCategoria[]
+  fotos                FotoPlantio[]
+
+  @@map("plantios")
+}
+
+model PlantioCategoria {
+  plantio     Plantio   @relation(fields: [plantioId], references: [id], onDelete: Cascade)
+  plantioId   Int
+  categoria   Categoria @relation(fields: [categoriaId], references: [id])
+  categoriaId Int
+
+  @@id([plantioId, categoriaId])
+  @@map("plantio_categorias")
+}
+
+model FotoPlantio {
+  id        Int     @id @default(autoincrement())
+  plantio   Plantio @relation(fields: [plantioId], references: [id], onDelete: Cascade)
+  plantioId Int
+  url       String
+
+  @@map("fotos_plantio")
+}
