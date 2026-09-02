@@ -73,3 +73,23 @@ model FotoPlantio {
 
   @@map("fotos_plantio")
 }
+
+enum TipoMidiaCarrossel {
+  FOTO
+  VIDEO
+}
+
+// Carrossel de fotos/videos institucionais exibido na home, entre
+// "Sobre o projeto" e o mapa das escolas. Preenchido pelo Admin (mesma
+// senha docente de lib/auth.ts - ver actions/carrossel.ts) via upload
+// direto para o Vercel Blob; aqui so guardamos a URL publica resultante.
+model CarrosselItem {
+  id       Int                @id @default(autoincrement())
+  tipo     TipoMidiaCarrossel
+  url      String
+  legenda  String?
+  ordem    Int                @default(0)
+  criadoEm DateTime           @default(now())
+
+  @@map("carrossel_itens")
+}

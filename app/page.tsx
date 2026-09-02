@@ -2,6 +2,8 @@ import Image from 'next/image'
 import { prisma } from '@/lib/prisma'
 import { estaAutenticado } from '@/lib/auth'
 import { AcessoProfessor } from '@/components/layout/AcessoProfessor'
+import { Carrossel } from '@/components/carrossel/Carrossel'
+import { listarCarrossel } from '@/actions/carrossel'
 import { PainelEscolas } from '@/components/escolas/PainelEscolas'
 import { GraficoMensal } from '@/components/graficos/GraficoMensal'
 import { GraficoCategoria } from '@/components/graficos/GraficoCategoria'
@@ -38,9 +40,10 @@ type PlantioRow = PlantioComCategorias & {
 export default async function Home() {
   let escolas: EscolaRow[] = []
   let plantios: PlantioRow[] = []
+  let itensCarrossel: Awaited<ReturnType<typeof listarCarrossel>> = []
 
   try {
-    ;[escolas, plantios] = await Promise.all([
+    ;[escolas, plantios, itensCarrossel] = await Promise.all([
       // select explicito: nunca mandar `tokenEdicao` (nem `cep`/`endereco`,
       // sem uso na tela publica) para o client - o objeto inteiro retornado
       // aqui e serializado para o navegador de qualquer visitante ao ser
@@ -64,6 +67,7 @@ export default async function Home() {
         },
         orderBy: { dataRegistro: 'desc' },
       }),
+      listarCarrossel(),
     ])
   } catch (erro) {
     console.error('Falha ao carregar dados do Neon, exibindo estado vazio:', erro)
@@ -155,6 +159,8 @@ export default async function Home() {
             </figure>
           </div>
         </div>
+
+        <Carrossel itens={itensCarrossel} autenticado={autenticado} />
 
         <PainelEscolas escolas={escolas} plantios={plantios} autenticado={autenticado} />
 
